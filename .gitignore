@@ -1,0 +1,38 @@
+# === Agent tooling (always) ===
+.hermes/
+.wrangler/
+.openclaw/
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# === Local secrets (always) ===
+.env
+.env.local
+.env.*.local
+*.local
+.dev.vars
+secrets.json
+secrets.yaml
+
+# === OS / editor ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# === Logs ===
+*.log
+logs/
