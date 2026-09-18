@@ -74,6 +74,9 @@ OPENCODE_UA = (
 OPENCODE_SESSION = str(uuid.uuid4())  # per-process session id (required by zen/go)
 
 BAILIAN_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1/messages"
+# OpenAI-compatible sibling of the Token Plan endpoint (verified live 2026-09-18:
+# accepts Bearer auth, supports stream + stream_options + tool calls).
+BAILIAN_COMPAT_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
 
 DEFAULT_MAX_TOKENS = 2048
 JEV_TIMEOUT = 30.0
@@ -223,6 +226,15 @@ SPEED_GATE = 0.60     # speed_priority noul at/above this → fast tier
 COMPLEX_HARD = 1.20   # complexity score at/above this counts as hard
 
 
+def chain_for_tier(tier: str) -> list[Route]:
+    """Tier chain + balanced fallbacks appended (dedup, order preserved)."""
+    chain = list(TIERS[tier])
+    if tier != "balanced":
+        seen = {r.id for r in chain}
+        chain += [r for r in TIERS["balanced"] if r.id not in seen]
+    return chain
+
+
 def decide(answers: dict) -> dict:
     task = answers["task_type"]
     comp = answers["complexity"]
@@ -272,10 +284,7 @@ def decide(answers: dict) -> dict:
         tier = "balanced"
         reasons.append("unmapped task → balanced")
 
-    chain = list(TIERS[tier])
-    if tier != "balanced":
-        seen = {r.id for r in chain}
-        chain += [r for r in TIERS["balanced"] if r.id not in seen]
+    chain = chain_for_tier(tier)
 
     chosen = chain[0]
     return {
@@ -374,6 +383,57 @@ def call_model(route: Route, prompt: str, system: str | None = None,
     else:
         raise RouterError(f"unknown provider {route.provider}")
     return text, usage, time.time() - t0, model_ret
+
+
+def _upstream_headers(provider: str) -> dict:
+    if provider == "bailian":
+        return {
+            "Authorization": f"Bearer {ENV.get('TOKEN_PLAN_API_KEY', '')}",
+            "Content-Type": "application/json",
+        }
+    if provider == "opencode-go":
+        return {
+            "Authorization": f"Bearer {ENV.get('OPENCODE_GO_API_KEY', '')}",
+            "User-Agent": OPENCODE_UA,
+            "x-opencode-session": OPENCODE_SESSION,
+            "Content-Type": "application/json",
+        }
+    raise RouterError(f"unknown provider {provider}")
+
+
+def _upstream_url(provider: str) -> str:
+    if provider == "bailian":
+        return BAILIAN_COMPAT_URL
+    if provider == "opencode-go":
+        return f"{OPENCODE_URL}/chat/completions"
+    raise RouterError(f"unknown provider {provider}")
+
+
+def call_model_passthrough(route: Route, body: dict) -> tuple[httpx.Response, httpx.Client]:
+    """Forward an OpenAI chat-completions body untouched to the route's
+    provider (conversation history, tools, streaming all preserved).
+
+    Returns (open streaming Response, client) — caller must close BOTH."""
+    payload = dict(body)
+    payload["model"] = route.model
+    client = httpx.Client(timeout=MODEL_TIMEOUT)
+    try:
+        req = client.build_request(
+            "POST",
+            _upstream_url(route.provider),
+            json=payload,
+            headers=_upstream_headers(route.provider),
+        )
+        r = client.send(req, stream=True)
+    except httpx.HTTPError as e:
+        client.close()
+        raise RouterError(f"{route.id}: {e}") from e
+    if r.status_code != 200:
+        raw = r.read()[:400]
+        r.close()
+        client.close()
+        raise RouterError(f"{route.id} HTTP {r.status_code}: {raw.decode('utf-8', 'replace')}")
+    return r, client
 
 
 def execute(chain: list[Route], prompt: str, system: str | None = None,
