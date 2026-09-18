@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Quick CLI wrapper: ./route "your prompt"  (+ any router.py flags)
+exec python3 "$(dirname "$0")/router.py" "$@"
