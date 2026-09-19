@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Quick CLI wrapper: ./calibrate [--target 0.2] [--simulate STAKES_GATE=0.55]
+exec python3 "$(dirname "$0")/calibrate.py" "$@"

@@ -38,7 +38,11 @@ attached to every response.
   loop costs one jev call, not one per hop.
 - 📊 **Observability built in** — `X-Router-*` response headers, an `x_router`
   trace in non-stream bodies, and one JSON line per request in
-  `logs/decisions.jsonl` (tier, fallbacks, upstream model, token usage).
+  `logs/decisions.jsonl` (tier, fallbacks, upstream model, raw jev scores,
+  token usage).
+- 🎚️ **Calibrated thresholds, not guesses** — `./calibrate` re-derives the
+  gates from logged scores by quantile targeting (RouteLLM's method) and
+  replays real decisions through the policy before you apply them.
 - 🛡️ **Graceful degradation** — classifier down → deterministic balanced
   chain; no configuration makes the proxy hard-fail at routing time.
 - ️ **Two interfaces** — OpenAI-compatible server + a CLI (`./route`) that
@@ -157,15 +161,61 @@ What this implies for this router:
 - **Confidence floors around 0.25–0.5 exist in the wild** — Aurelio's fitted
   values (~0.25) are more permissive than its 0.5 default; `CONF_GATE = 0.40`
   sits between the two camps.
-- **The right long-term move is calibration** — RouteLLM's recipe: pick the
-  % of traffic you *want* on the strong side, take the matching quantile of
-  observed scores, and use that as the gate. This router logs tier + chosen
-  model per request; a v0.3 upgrade is to also log the raw jev scores and run
-  the same quantile exercise on real traffic.
+- **The gate values are calibrated, not guessed.** Every decision now logs its
+  raw jev scores, and `./calibrate` re-derives the gates from real traffic by
+  quantile targeting (RouteLLM's recipe) instead of hand-picking numbers.
+  See [Calibration](#calibration).
 
 Validate any change against the routing battery — `./route --route-only` on a
 set of representative prompts — before trusting it. Thresholds are policy,
 not truth.
+
+## Calibration
+
+The gates above are conservative defaults; they were never tuned on data. The
+calibration tool turns them into a **traffic-mix decision**:
+
+```
+threshold = quantile(1 − target)     # target = share of traffic allowed on the strong tier
+```
+
+Pick the share you are willing to pay for ("20% of requests may reach the
+strong tier"), read the threshold off the observed score distribution, then
+verify the effect by replaying real decisions through the actual policy.
+
+1. Each decision logs a flat `scores` block — the raw jev values (see the log
+   schema below).
+2. `./calibrate` prints score percentiles, how much traffic each current gate
+   admits, and the threshold that hits a target mix.
+3. `--simulate NAME=VALUE` re-runs the *real* `decide()` on logged scores with
+   candidate gates → resulting tier mix + how many decisions move.
+4. `--write NAME=VALUE` edits `router.py` explicitly, then restart the unit.
+
+```bash
+./calibrate                              # summary + target table
+./calibrate --target 0.2                 # 20% strong → threshold + realized %
+./calibrate --simulate STAKES_GATE=0.55  # replay the policy in-sample
+./calibrate --write STAKES_GATE=0.55     # apply (prints the diff) + restart
+```
+
+Real output on this host (small early sample — 13 unique decisions):
+
+```
+-- quantile targets (stakes → strong) --
+  target   threshold   realized
+     10%       0.830      15.4%
+     20%       0.542      23.1%
+     30%       0.206      30.8%
+     40%       0.134      38.5%
+```
+
+Two guards keep the sample honest: cache hits (tool-loop hops replaying the
+same conversation) are excluded by default, and identical score vectors are
+deduplicated so a single prompt cannot dominate the distribution.
+`--min-samples` (default 100) warns when the sample is too small to act on —
+below that the thresholds are indicative only. Note that scores only exist
+from the commit that introduced them onward, so the distribution grows with
+real usage; `--days N` restricts to a recent window.
 
 ## vs. existing routers
 
@@ -210,9 +260,15 @@ database of this service):
 {"ts": 1789773569.67, "req_id": "8a17f86dfdff", "kind": "done",
  "chosen": "bailian/deepseek-v4.1-flash", "tier": "fast", "cached": false,
  "fallbacks": [], "upstream_model": "deepseek-v4.1-flash",
+ "scores": {"task": "factual", "task_conf": 1.0, "complexity": 0.0,
+            "complexity_conf": 0.9, "stakes": 0.02, "speed": 0.06},
+ "reasons": ["factual → fast tier"],
  "usage": {"prompt_tokens": 40, "completion_tokens": 139, "total_tokens": 179},
  "elapsed_s": 2.57}
 ```
+
+`scores` is the raw jev output for that decision — the input to `./calibrate`
+(thresholds are re-derived from this column, never from guesses).
 
 `kind` ∈ `done | stream_done | failed | classify_failed | buffer_error |
 stream_error`. `fallbacks` lists every hop that failed before the chosen one
@@ -258,7 +314,9 @@ curl "localhost:8790/decisions?limit=20"
 model-router/
 ├── router.py                  # pipeline: classify → decide → execute → trace, pools, providers, CLI
 ├── server.py                  # FastAPI: proxy, route cache, SSE relay, decision log
+├── calibrate.py               # threshold calibration (quantile targeting + policy replay)
 ├── route                      # CLI wrapper
+├── calibrate                  # calibration wrapper
 ├── serve.sh                   # server launcher (127.0.0.1:8790)
 ├── requirements.txt           # httpx, fastapi, uvicorn
 ├── docs/screenshots/          # README evidence (real terminal captures)
@@ -298,8 +356,9 @@ binds `127.0.0.1` only.
 
 ## Roadmap
 
-- Log raw jev scores per decision → run RouteLLM-style quantile calibration
-  on real traffic to re-derive the gates for a target tier mix.
+- ~~Log raw jev scores per decision → run RouteLLM-style quantile calibration
+  on real traffic to re-derive the gates for a target tier mix.~~ **Done** —
+  `calibrate.py` + `scores` in the decision log (see [Calibration](#calibration)).
 - Per-request cost ceiling à la RouteLLM/bin-packing (budget parameter T).
 - Outcome feedback loop (retry/edit detection) → adaptive gates.
 - Prometheus metrics endpoint.

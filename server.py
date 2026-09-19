@@ -94,6 +94,29 @@ def _log(entry: dict) -> None:
         pass
 
 
+def _raw_scores(jev: dict | None) -> dict | None:
+    """Raw jev values per decision — the input to offline threshold calibration.
+
+    calibrate.py replays these through R.decide() to recompute gates by
+    quantile targeting (RouteLLM method). Keep the keys flat and stable.
+    """
+    if not jev:
+        return None
+    a = jev.get("answers") or {}
+    tt = a.get("task_type") or {}
+    cx = a.get("complexity") or {}
+    st = a.get("high_stakes") or {}
+    sp = a.get("speed_priority") or {}
+    return {
+        "task": tt.get("choice"),
+        "task_conf": tt.get("confidence"),
+        "complexity": cx.get("score"),
+        "complexity_conf": cx.get("confidence"),
+        "stakes": st.get("noul"),
+        "speed": sp.get("noul"),
+    }
+
+
 # ---------------------------------------------------------------------- misc
 
 
@@ -313,6 +336,8 @@ def _relay(upstream: httpx.Response, client: httpx.Client, req_id: str,
             "ts": time.time(), "req_id": req_id, "kind": "stream_done",
             "chosen": decision.get("chosen"), "tier": decision.get("tier"),
             "cached": decision.get("cached"), "fallbacks": tried,
+            "scores": decision.get("scores"),
+            "reasons": decision.get("reasons"),
             "usage": usage, "elapsed_s": round(time.time() - t0, 2),
         })
 
@@ -343,6 +368,8 @@ def chat_completions(body: dict):
             {"error": {"message": str(e), "type": "router_error"}}, status_code=400
         )
 
+    scores = _raw_scores(jev)
+
     try:
         upstream, client, route, tried = _open_upstream(chain, body)
     except R.RouterError as e:
@@ -361,7 +388,8 @@ def chat_completions(body: dict):
     if stream:
         headers["X-Accel-Buffering"] = "no"
         return StreamingResponse(
-            _relay(upstream, client, req_id, {**decision, "chosen": route.id}, t0, tried),
+            _relay(upstream, client, req_id,
+                   {**decision, "chosen": route.id, "scores": scores}, t0, tried),
             media_type="text/event-stream",
             headers=headers,
         )
@@ -388,6 +416,7 @@ def chat_completions(body: dict):
         "chosen": route.id, "tier": decision.get("tier"),
         "cached": decision.get("cached"), "fallbacks": tried,
         "upstream_model": parsed.get("model"),
+        "scores": scores, "reasons": decision.get("reasons"),
         "usage": usage, "elapsed_s": round(time.time() - t0, 2),
     })
 
