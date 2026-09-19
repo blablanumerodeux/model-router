@@ -125,10 +125,24 @@ Policy constants at the top of the DECIDE section in `router.py`:
 
 ```python
 CONF_GATE    = 0.40   # task_type confidence below this → safe balanced default
-STAKES_GATE  = 0.65   # high_stakes noul at/above this → strong tier
+STAKES_GATE  = 0.90   # high_stakes noul at/above this → strong tier
 SPEED_GATE   = 0.60   # speed_priority noul at/above this → fast tier
-COMPLEX_HARD = 1.20   # complexity score (0–2) at/above this counts as hard
+COMPLEX_HARD = 1.60   # complexity score (0–2) at/above this counts as hard
 ```
+
+`STAKES_GATE` and `COMPLEX_HARD` were raised from their v0 defaults (0.65 /
+1.20) to hold the strong tier under a **10% cost budget** — the strong pool is
+the expensive one (kimi-k3, qwen3.8-max). Both levers matter, because the
+strong tier is reachable two ways: the stakes gate, or *analysis with
+complexity ≥ COMPLEX_HARD*. `./calibrate --max-strong 0.10` picks the most
+permissive pair that satisfies the cap (see [Calibration](#calibration)).
+
+Observed effect: on the calibration sample the strong share goes 27% → 7%. On
+real agent traffic it was already 0% — the cap is insurance for high-stakes
+volume, not a change in daily behaviour. The trade is explicit: escalations now
+need `stakes ≥ 0.90`, so a request scored 0.7–0.9 (worth double-checking) lands
+on `balanced`/`code` (glm-5.2, kimi-k2.7-code) instead of `strong`. Genuinely
+extreme asks (medical 0.96, a contract before signing 0.93) still escalate.
 
 These are **conservative local defaults** — deliberately biased toward the
 cheap tier, with the escalation path (stakes) kept for genuinely risky asks.
@@ -154,10 +168,12 @@ What this implies for this router:
   command* instead of a magic constant; Aurelio's fitted thresholds moved a
   full 2× away from the hand default. Treat the constants above as a v0
   starting point, not truth.
-- **Noul gates at 0.6–0.65 are the honest reading of "clearly yes"** — TypeSafe
-  docs note a noul near 0.5 means *ambiguous*, not 50% intensity. `STAKES_GATE
-  = 0.65` fires only when the stakes signal is unambiguous. If strong-tier
-  spend matters less than missed escalations, 0.60 is defensible.
+- **Noul gates at 0.6–0.65 read as "clearly yes"** — TypeSafe docs note a noul
+  near 0.5 means *ambiguous*, not 50% intensity. At `STAKES_GATE = 0.65` the
+  gate fires only on unambiguous stakes. The `0.90` now in place is
+  deliberately *stricter* than that reading — it was bought as a cost cap, not
+  as a better reading of the signal. If missed escalations hurt more than
+  strong-tier spend, 0.60–0.65 is the better trade.
 - **Confidence floors around 0.25–0.5 exist in the wild** — Aurelio's fitted
   values (~0.25) are more permissive than its 0.5 default; `CONF_GATE = 0.40`
   sits between the two camps.
@@ -189,25 +205,40 @@ verify the effect by replaying real decisions through the actual policy.
    admits, and the threshold that hits a target mix.
 3. `--simulate NAME=VALUE` re-runs the *real* `decide()` on logged scores with
    candidate gates → resulting tier mix + how many decisions move.
-4. `--write NAME=VALUE` edits `router.py` explicitly, then restart the unit.
+4. `--max-strong P` answers the cost question directly: find the most
+   permissive gate pair that keeps the strong tier under `P` of traffic.
+   Both escalation paths are searched (stakes gate *and* the
+   analysis/complexity one), because capping only the stakes gate leaves the
+   other route open.
+5. `--write NAME=VALUE` edits `router.py` explicitly, then restart the unit.
 
 ```bash
 ./calibrate                              # summary + target table
 ./calibrate --target 0.2                 # 20% strong → threshold + realized %
-./calibrate --simulate STAKES_GATE=0.55  # replay the policy in-sample
-./calibrate --write STAKES_GATE=0.55     # apply (prints the diff) + restart
+./calibrate --max-strong 0.10            # cap: most permissive gates under 10%
+./calibrate --simulate STAKES_GATE=0.9 COMPLEX_HARD=1.6   # replay in-sample
+./calibrate --write STAKES_GATE=0.9 COMPLEX_HARD=1.6      # apply + restart
 ```
 
-Real output on this host (small early sample — 13 unique decisions):
+Real output on this host (early sample — 15 unique decisions):
 
 ```
 -- quantile targets (stakes → strong) --
   target   threshold   realized
-     10%       0.830      15.4%
-     20%       0.542      23.1%
-     30%       0.206      30.8%
-     40%       0.134      38.5%
+     10%       0.810      13.3%
+     20%       0.694      20.0%
+
+-- strong-tier cap (target <10%) --
+recommended : STAKES_GATE=0.93  COMPLEX_HARD=1.81
+strong share: 6.7%  (was 26.7%)
+tier mix    : fast 33% · balanced 33% · code 13% · creative 13% · strong 7%
 ```
+
+**A static gate is a cap, not a guarantee.** The share the strong tier gets
+depends on the traffic mix: on a high-stakes-heavy sample even a strict gate
+admits more than `P`, and no gate value can promise a hard ceiling. For an
+enforced ceiling, the runtime budget (per-request cost accounting, roadmap)
+is the right mechanism — the gate only shapes the distribution.
 
 Two guards keep the sample honest: cache hits (tool-loop hops replaying the
 same conversation) are excluded by default, and identical score vectors are

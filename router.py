@@ -221,9 +221,9 @@ def classify(prompt: str, system: str | None = None) -> tuple[dict, dict, float]
 # ----------------------------------------------------------------------------
 
 CONF_GATE = 0.40      # task_type confidence below this → safe default
-STAKES_GATE = 0.65    # high_stakes noul at/above this → strong tier
+STAKES_GATE = 0.90    # high_stakes noul at/above this → strong tier
 SPEED_GATE = 0.60     # speed_priority noul at/above this → fast tier
-COMPLEX_HARD = 1.20   # complexity score at/above this counts as hard
+COMPLEX_HARD = 1.60   # complexity score at/above this counts as hard
 
 
 def chain_for_tier(tier: str) -> list[Route]:

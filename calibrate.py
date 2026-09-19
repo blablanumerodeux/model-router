@@ -150,6 +150,40 @@ def mix_line(mix: Counter, n: int) -> str:
     return " · ".join(parts)
 
 
+def search_max_strong(rows: list[dict], target: float) -> dict | None:
+    """Find the most permissive gates that keep the strong tier at <= target.
+
+    The strong tier is reachable two ways: the stakes gate, and "analysis with
+    complexity >= COMPLEX_HARD". A cap therefore needs both levers, so we scan
+    observed thresholds ascending (safety-first: smallest STAKES_GATE wins,
+    then smallest COMPLEX_HARD) and return the first combination that fits.
+    """
+    n = len(rows)
+    if not n:
+        return None
+    stakes_vals = sorted({float(r["scores"]["stakes"]) for r in rows
+                          if r["scores"].get("stakes") is not None})
+    comp_vals = sorted({float(r["scores"]["complexity"]) for r in rows
+                        if r["scores"].get("complexity") is not None})
+    if not stakes_vals:
+        return None
+    comps = comp_vals or [float(getattr(R, "COMPLEX_HARD"))]
+    best_floor: tuple[float, float, float] = (1.0, stakes_vals[0], comps[0])
+    for s in stakes_vals:
+        for c in comps:
+            mix, _ = replay(rows, {"STAKES_GATE": s, "COMPLEX_HARD": c})
+            share = mix.get("strong", 0) / n
+            if share < best_floor[0]:
+                best_floor = (share, s, c)
+            if share <= target:
+                return {"STAKES_GATE": s, "COMPLEX_HARD": c, "strong_share": share,
+                        "tier_mix": dict(mix), "found": True}
+    return {"STAKES_GATE": best_floor[1], "COMPLEX_HARD": best_floor[2],
+            "strong_share": best_floor[0], "found": False,
+            "note": "target unreachable on this sample — strong tier cannot go lower"}
+
+
+
 # -------------------------------------------------------------------- report
 
 def main() -> int:
@@ -160,6 +194,9 @@ def main() -> int:
                     help="candidate gates to replay, e.g. STAKES_GATE=0.55 SPEED_GATE=0.5")
     ap.add_argument("--write", nargs="+", default=None, metavar="NAME=VALUE",
                     help="apply gates to router.py (explicit, prints the change)")
+    ap.add_argument("--max-strong", type=float, default=None, metavar="P",
+                    help="cap the strong tier at fraction P of traffic (e.g. 0.10) "
+                         "→ prints the most permissive gates that satisfy it")
     ap.add_argument("--days", type=float, default=None, help="only consider the last N days")
     ap.add_argument("--min-samples", type=int, default=100,
                     help="warn below this many unique decisions (default 100)")
@@ -217,6 +254,11 @@ def main() -> int:
         },
         "quantile_targets": table,
     }
+
+    if args.max_strong is not None and n:
+        cap = search_max_strong(rows, args.max_strong)
+        if cap:
+            report["max_strong"] = {**cap, "target": args.max_strong}
 
     # explicit simulation
     if args.simulate:
@@ -299,6 +341,19 @@ def main() -> int:
         thr = row["stakes_threshold"]
         flag = "  <- current" if abs(thr - current["STAKES_GATE"]) < 1e-9 else ""
         print(f"{row['target_strong_pct']:>7.0f}%{thr:>12.3f}{row['realized_pct']:>10.1f}%{flag}")
+
+    if "max_strong" in report:
+        m = report["max_strong"]
+        print(f"\n-- strong-tier cap (target <{m['target'] * 100:.0f}%) --")
+        if m["found"]:
+            print(f"recommended : STAKES_GATE={m['STAKES_GATE']}  COMPLEX_HARD={m['COMPLEX_HARD']}")
+            print(f"strong share: {100 * m['strong_share']:.1f}%  (was "
+                  f"{100 * observed_mix.get('strong', 0) / n:.1f}%)")
+            print(f"tier mix    : {mix_line(Counter(m['tier_mix']), n)}")
+        else:
+            print(f"NOT reachable on this sample — {m.get('note', '')}")
+            print(f"floor: strong {100 * m['strong_share']:.1f}% at STAKES_GATE="
+                  f"{m['STAKES_GATE']}, COMPLEX_HARD={m['COMPLEX_HARD']}")
 
     if args.simulate and "simulation" in report:
         s = report["simulation"]
